@@ -4,5 +4,6 @@
   "startup_script": "main.py",
   "use_pythonw": false,
   "venv_folder": "venv",
+  "python_version": "3.11",
   "icon": "icon.ico"
 }

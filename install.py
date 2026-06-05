@@ -3,25 +3,23 @@ import json
 import locale
 import logging
 import os
+import re
 import sys
 import threading
 import subprocess
 import time
 
-baserequirements = [
-    "requests",
-    "googletrans~=4.0.0rc1",
-    "PyQt6",
-    "PyQt6-Qt6",
-    "dulwich~=0.21.5"
-]
+import googletrans
+from PyQt6 import QtWidgets, QtCore, QtGui
+import dulwich
+from dulwich import porcelain, client, repo
+import requests
 
 logsDir = "logs"
 
 if not os.path.exists(logsDir):
     os.makedirs(logsDir)
 
-#Logging setup...
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 debug_handler = logging.FileHandler(os.path.join(logsDir,'install-debug.log'))
@@ -37,77 +35,19 @@ logger.addHandler(debug_handler)
 logger.addHandler(error_handler)
 
 subprocess_flags = 0
-if os.name == 'nt':  # Check if the operating system is Windows
-    subprocess_flags = subprocess.CREATE_NO_WINDOW  # Prevent the command prompt from appearing on Windows
+if os.name == 'nt':
+    subprocess_flags = subprocess.CREATE_NO_WINDOW
 
-def install_base_requirements(installDoneEvent:threading.Event):
-    try:
-        pipargs = [sys.executable, '-m', 'pip', 'install', '--upgrade']
-        pipargs.extend(baserequirements)
+uv_path = os.environ.get("UV_PATH", "uv")
+venv_path = os.environ.get("VENV_PATH", "venv")
 
-        completed_process = subprocess.run(pipargs,
-                                           check=True,
-                                           text=True,
-                                           capture_output=True,
-                                           creationflags=subprocess_flags)
+def uv_pip_install(*args, **kwargs):
+    cmd = [uv_path, 'pip', 'install', '--python', venv_path, '--no-progress'] + list(args)
+    defaults = dict(capture_output=True, check=True, text=True, creationflags=subprocess_flags)
+    defaults.update(kwargs)
+    return subprocess.run(cmd, **defaults)
 
-        logger.debug(completed_process.stdout)
-        if completed_process.stderr:
-            logger.error(completed_process.stderr)
-
-        logger.debug("Done installing packages, exiting...")
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to install packages: {e.stdout} {e.stderr}")
-    finally:
-        # Close the messagebox when done
-        installDoneEvent.set()
-
-logger.debug("Checking prerequisites...")
-try:
-    import googletrans
-    from PyQt6 import QtWidgets, QtCore, QtGui
-    import dulwich
-    from dulwich import porcelain, client, repo
-    import requests
-except ModuleNotFoundError as e:
-    #Prerequisite not found, need to install the base requirements
-    logger.debug(f"Base requirements missing {e}, installing...")
-    import tkinter as tk
-    from tkinter import messagebox
-    import importlib
-
-    root = tk.Tk()
-    root.withdraw()  # Hide the main window
-
-    # Show a custom message window
-    top = tk.Toplevel()
-    top.title('Install')
-    msg = tk.Message(top, text="Installing prerequisites.\nPlease wait...", padx=20, pady=20)
-    msg.pack()
-
-    # Start the installation in a separate thread
-    install_done = threading.Event()
-    thread = threading.Thread(target=install_base_requirements, args=(install_done,))
-    thread.start()
-
-    def check_event():
-        if install_done.is_set():
-            root.destroy()
-        else:
-            root.after(100, check_event)
-
-
-    check_event()  # start checking event
-
-    root.mainloop()
-    logger.debug("Done installing prerequisites - exiting with errorcode 99 to signal the go launcher to restart.")
-    logger.debug("Also, creating the 'installing' file, as I'm gonna go ahead and assume we need to do some cleanup.")
-    open("installing", 'w').close()
-    exit(99)
-except ImportError as e:
-    logger.debug(f"{e}: Some other bug happened!")
-    exit(99)
-logger.debug("Prerequisites found.")
+logger.debug("All prerequisites available (installed by Go launcher).")
 repoData = json.load(open("repo.json"))
 
 colors_dict = {
@@ -140,7 +80,6 @@ def translate_ui_text(text):
         return text
 
     if os.name == "nt":
-        # windows-specific
         import ctypes
         windll = ctypes.windll.kernel32
         import locale
@@ -148,7 +87,6 @@ def translate_ui_text(text):
         if "_" in langCode:
             langCode = langCode.split("_")[0]
     else:
-        # macos or linux
         import locale
         langCode = locale.getdefaultlocale()[0].split("_")[0]
 
@@ -172,7 +110,7 @@ def translate_ui_text(text):
         translatedText = text
         translatedText = translatedText[0].upper() + translatedText[1:]
 
-    if langCode not in ['ja', 'zh-cn', 'zh-tw']:  # Add more if needed
+    if langCode not in ['ja', 'zh-cn', 'zh-tw']:
         translatedText = translatedText[0].upper() + translatedText[1:]
 
     translatedText = translatedText.strip()
@@ -188,16 +126,16 @@ def get_stylesheet():
         background-color: {primary_color};
         color: {secondary_color};
     }
-    
+
     QLabel {
         color: {text_color};
     }
-    
+
     QMessageBox {
         background-color: {primary_color};
         color: {text_color};
     }
-    
+
     QProgressBar {
             border: 0px solid {hover_color};
             text-align: center;
@@ -207,12 +145,12 @@ def get_stylesheet():
     QProgressBar::chunk {
         background-color: {toggle_color};
     }
-    
+
     QPushButton {
         background-color: {secondary_color};
         color: {text_color};
     }
-    
+
     QPushButton:hover {
         background-color: {hover_color};
     }
@@ -222,7 +160,6 @@ def get_stylesheet():
         styleSheet = styleSheet.replace("{" + colorKey + "}", colorValue)
     return styleSheet
 
-#Yes, a bunch of this code was done with GPT-4's help because I'm lazy like that.
 def format_eta(seconds) -> str:
     hours, remainder = divmod(seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
@@ -248,8 +185,8 @@ class DownloadThread(QtCore.QThread):
         response = requests.get(self.url, stream=True)
         total_size_in_bytes = response.headers.get('content-length')
 
-        if total_size_in_bytes is None:  # If 'content-length' is not found in headers
-            self.setProgressBarTotalSignal.emit(-1)  # Set progress bar to indeterminate state
+        if total_size_in_bytes is None:
+            self.setProgressBarTotalSignal.emit(-1)
         else:
             total_size_in_bytes = int(total_size_in_bytes)
             self.setProgressBarTotalSignal.emit(total_size_in_bytes)
@@ -261,7 +198,7 @@ class DownloadThread(QtCore.QThread):
 
             start_time = time.time()
             total_data_received = 0
-            last_emit_time = start_time  # Initialize last_emit_time to start_time
+            last_emit_time = start_time
             data_received_since_last_emit = 0
 
             for data in response.iter_content(block_size):
@@ -269,23 +206,21 @@ class DownloadThread(QtCore.QThread):
                 data_received_since_last_emit += len(data)
 
                 file.write(data)
-                if total_size_in_bytes is not None:  # Only update if 'content-length' was found
+                if total_size_in_bytes is not None:
                     current_time = time.time()
                     if current_time - last_emit_time >= 1:
                         elapsed_time_since_last_emit = current_time - last_emit_time
                         download_speed = data_received_since_last_emit / elapsed_time_since_last_emit
                         logger.debug(f"Download speed: {download_speed / 1024 / 1024:.2f} MBps")
 
-                        # Calculate ETA
                         remaining_data = total_size_in_bytes - total_data_received
-                        if download_speed != 0:  # Avoid division by zero
+                        if download_speed != 0:
                             eta = int(remaining_data / download_speed)
                             logger.debug(f"ETA: {eta} seconds")
                             self.labelTextSignal.emit(eta)
                         self.updateProgressSignal.emit(int((total_data_received / total_size_in_bytes) * 100))
-                        # Reset tracking variables for the next X seconds
-                        last_emit_time = current_time  # Update last_emit_time
-                        data_received_since_last_emit = 0  # Reset data_received_since_last_emit
+                        last_emit_time = current_time
+                        data_received_since_last_emit = 0
 
             file.flush()
             file.close()
@@ -355,6 +290,34 @@ class DownloadDialog(QtWidgets.QDialog):
         else:
             event.ignore()
 
+
+def resolve_torch_wheel_url(reqfile):
+    """Use uv's verbose dry-run to resolve the torch wheel URL directly."""
+    try:
+        result = subprocess.run(
+            [uv_path, 'pip', 'install', '--dry-run', '-v', '--no-cache',
+             '--python', venv_path, '-r', reqfile],
+            capture_output=True, text=True, creationflags=subprocess_flags
+        )
+        output = result.stdout + "\n" + result.stderr
+        logger.debug(f"uv dry-run output:\n{output}")
+    except Exception as e:
+        logger.error(f"Failed to resolve torch: {e}")
+        return None
+
+    # uv verbose output includes lines like:
+    # No cache entry for: https://download-r2.pytorch.org/whl/cu121/torch-2.5.1%2Bcu121-cp311-cp311-win_amd64.whl#sha256=...
+    for line in output.splitlines():
+        match = re.search(r'(https?://\S+/torch-[^\s#]+\.whl)', line, re.IGNORECASE)
+        if match:
+            url = match.group(1)
+            logger.debug(f"Resolved torch URL from uv: {url}")
+            return url
+
+    logger.debug("No torch download URL found in uv output.")
+    return None
+
+
 class PackageThread(QtCore.QThread):
     setLabelTextSignal = QtCore.pyqtSignal(str)
     setProgressMaxSignal = QtCore.pyqtSignal(int)
@@ -375,41 +338,21 @@ class PackageThread(QtCore.QThread):
 
                 completed_process = None
                 if package.startswith("-r"):
-                    # This is all pytorch-specific stuff.
+                    reqfile = package[2:].strip()
                     logger.debug(f"Installing {package}")
                     self.setLabelTextSignal.emit(torchInstallText)
-                    process = subprocess.Popen([sys.executable, '-m', 'pip', 'install', '--no-cache-dir','--upgrade', "-r", package[2:].strip()], stdout=subprocess.PIPE,
-                                               stderr=subprocess.STDOUT,
-                                               creationflags=subprocess_flags)
-                    url = None
-                    isCollecting = False
-                    for line in iter(process.stdout.readline, b''):  # Reads the output line by line.
-                        line = line.decode('utf-8').strip().lower()  # Decodes the bytes to string and removes newline character at the end.
-                        if "collecting torch" in line:
-                            # It's collecting torch
-                            isCollecting = True
-                        if isCollecting and "using cached" in line:
-                            # It's using the cached one. No need to do anything then.
-                            isCollecting = False
 
-                        if isCollecting and "downloading" in line:
-                            url = line[len("downloading"):]
-                            url = url[:url.rindex("(")].strip()
-                            logger.debug("Found correct wheel, killing pip...")
-                            # Pip has selected the wheel to download. Kill it.
-                            process.stdout.close()  # Closes the stdout pipe.
-                            process.terminate()
-                            process.wait()
-                            break
+                    # Resolve torch wheel URL for manual download with progress
+                    url = resolve_torch_wheel_url(reqfile)
 
                     if url is not None:
-                        logger.debug(f"URL found: {url}")
+                        logger.debug(f"Torch wheel URL: {url}")
                         import urllib.parse
-                        filename = urllib.parse.unquote(url[url.rindex("/") + 1:])
+                        filename = urllib.parse.unquote(url.split("?")[0].rsplit("/", 1)[-1])
                         logger.debug(f"Filename: {filename}")
 
                         if os.path.exists(filename):
-                            logger.debug("Deleting file...")
+                            logger.debug("Deleting existing file...")
                             os.remove(filename)
 
                         if self.downloadDone.is_set():
@@ -420,25 +363,21 @@ class PackageThread(QtCore.QThread):
 
                         if not os.path.exists(filename):
                             self.showErrorSignal.emit(f"An error occurred while installing package '{package}', we were unable to download the corresponding wheel.")
-                            return  # Something went wrong. Throw an error and exit.
-                        # Done downloading it - install it
-                        completed_process = subprocess.run([sys.executable, '-m', 'pip', 'install', filename], check=True, text=True, capture_output=True, creationflags=subprocess_flags)
+                            return
+
+                        completed_process = uv_pip_install(filename)
                         logger.debug(completed_process.stdout)
-                        # Remove the file
                         os.remove(filename)
-                        # Now we re-install the requirements from the file.
-                        completed_process = subprocess.run([sys.executable, '-m', 'pip', 'install', '--upgrade', "-r", package[2:].strip()], check=True, text=True, capture_output=True,
-                                                           creationflags=subprocess_flags)
-                    else:
-                        logger.debug("We used the cached torch or it was already installed. This shouldn't happen as I disabled the cache.")
-                    # subprocess.run([sys.executable, '-m', 'pip', 'install', '--upgrade', "-r", package[2:].strip()], check=True, text=True, capture_output=True, creationflags=subprocess_flags)
+
+                    # Install remaining deps from the requirements file
+                    completed_process = uv_pip_install('--upgrade', '-r', reqfile)
                 else:
                     index = min([package.find(char) for char in ['=', '~', '>'] if package.find(char) != -1], default=-1)
                     packageName = package if index == -1 else package[:index]
                     logger.debug(f"Installing {packageName}")
                     self.setLabelTextSignal.emit(f"{normalInstallText} ({packageName})")
 
-                    completed_process = subprocess.run([sys.executable, '-m', 'pip', 'install', '--upgrade', package], check=True, text=True, capture_output=True, creationflags=subprocess_flags)
+                    completed_process = uv_pip_install('--upgrade', package)
                 if completed_process is not None:
                     logger.debug(completed_process.stdout)
                 logger.debug(f"Current progress: {int((i + 1) / total_packages * 100)}%")
@@ -535,7 +474,6 @@ def run_startup(repo_dir, script):
             error_message = e.output.decode('utf-8')
             sys.stderr.write(f"Startup script subprocess stderr:\n {error_message}\n")
             if "ModuleNotFoundError" in error_message:
-                #Let's signal to the go caller that we need to reinstall some module.
                 open("installing", "w").close()
                 raise ValueError("Missing module.")
             else:
@@ -553,27 +491,18 @@ def check_requirements(repo_dir):
         with open(req_file, 'r') as f:
             lines = f.read().splitlines()
 
-        # Strip out comments and whitespace, ignore empty lines
         packages += [line.split('#', 1)[0].strip() for line in lines if line.split('#', 1)[0].strip()]
 
-    # Filter out packages that include "pyqt6" in their name. We don't update those.
     packages = [package for package in packages if "pyqt6" not in package.lower()]
 
     return packages
 
 
 def check_if_latest(repo_path, remote_url) -> bool:
-    # Open the local repository
     gitRepo = dulwich.repo.Repo(repo_path)
-
-    # Get the current commit
     head = gitRepo[b"HEAD"]
-
-    # Open the remote repository
     gitClient, path = client.get_transport_and_path(remote_url)
     remote_refs = gitClient.get_refs(path)
-
-    # Check if current commit is the latest one
     return head.id == remote_refs[b"HEAD"]
 
 app = QtWidgets.QApplication([])
@@ -585,8 +514,6 @@ def main():
     repoDir = repoData["repo_dir"]
     startupScript = repoData["startup_script"]
 
-    #If it's missing or not the latest commit anymore, do a pull and make sure the requirements haven't changed.
-    #Also if it was previously installing and was interrupted partway through.
     if os.path.exists("installing") or not os.path.exists(repoDir) or not check_if_latest(repoDir, repoURL):
         open("installing", 'w').close()
         messageBox = QtWidgets.QMessageBox()

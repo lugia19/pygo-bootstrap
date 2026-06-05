@@ -20,8 +20,9 @@ import (
 var pythonBinaryPath string
 
 type Config struct {
-	UsePythonW bool   `json:"use_pythonw"`
-	VenvFolder string `json:"venv_folder"`
+	UsePythonW    bool   `json:"use_pythonw"`
+	VenvFolder    string `json:"venv_folder"`
+	PythonVersion string `json:"python_version"`
 }
 
 var config Config
@@ -78,7 +79,6 @@ func checkError(message string, err error) {
 
 		logFile := filepath.Join(logDir, "launcher-error.log")
 
-		// Write to a log file
 		f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
 			log.Fatal("Cannot open log file: ", err)
@@ -90,19 +90,39 @@ func checkError(message string, err error) {
 			}
 		}(f)
 
-		// Get the current time and format it
 		currentTime := time.Now().Format("2006-01-02 15:04:05")
-
-		// Append the timestamp to the log message
 		timestampedLogMsg := fmt.Sprintf("%s %s\n", currentTime, logMsg)
 
-		// Write the timestamped log message to the file
 		if _, err := f.WriteString(timestampedLogMsg); err != nil {
 			log.Println("Cannot write to log file: ", err)
 		}
 
 		log.Fatal(logMsg)
 	}
+}
+
+func uvPath() string {
+	exePath, err := os.Executable()
+	if err != nil {
+		log.Fatal("Cannot determine executable path: ", err)
+	}
+	return filepath.Join(filepath.Dir(exePath), "uv.exe")
+}
+
+func uvEnv() []string {
+	exePath, _ := os.Executable()
+	pythonInstallDir := filepath.Join(filepath.Dir(exePath), "python")
+	return append(os.Environ(), "UV_PYTHON_INSTALL_DIR="+pythonInstallDir)
+}
+
+func runUV(f *os.File, args ...string) error {
+	cmd := exec.Command(uvPath(), args...)
+	cmd.Env = uvEnv()
+	cmd.Stderr = f
+	if runtime.GOOS == "windows" {
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	}
+	return cmd.Run()
 }
 
 func main() {
@@ -121,7 +141,6 @@ func main() {
 	}
 	defer f.Close()
 
-	// Write the current time to the file
 	_, err = f.WriteString("Logging stderr for run at datetime: " + time.Now().Format("2006-01-02 15:04:05") + "\n")
 	if err != nil {
 		log.Fatal(err)
@@ -141,107 +160,106 @@ func main() {
 		}
 	}
 
-	//Check if venv already exists...
-	_, err = os.Stat(config.VenvFolder)
-	if os.IsNotExist(err) {
-		//Venv does not exist, create it.
-		if runtime.GOOS == "windows" {
-			dirs, err := os.ReadDir("WPy")
-			checkError("Error reading root directory", err)
-
-			// Find the first subfolder starts with "python-"
-			for _, dir := range dirs {
-				if dir.IsDir() && strings.HasPrefix(dir.Name(), "python-") {
-					subfolderPath := filepath.Join("WPy", dir.Name())
-					if config.UsePythonW {
-						pythonBinaryPath = filepath.Join(subfolderPath, "pythonw.exe")
-					} else {
-						pythonBinaryPath = filepath.Join(subfolderPath, "python.exe")
-					}
-					break
-				}
-			}
-		} else {
-			//TBD.
-		}
-
-		absBaseVenvPythonBinaryPath, err := filepath.Abs(pythonBinaryPath)
-		checkError("Cannot resolve absolute path for python binary", err)
-
-		fmt.Println("Base-venv Python Binary Path: ", absBaseVenvPythonBinaryPath) // Print pythonBinaryPath
-
-		newVenvCommand := exec.Command(absBaseVenvPythonBinaryPath, "-m", "venv", config.VenvFolder)
-		newVenvCommand.Stderr = f
-		if runtime.GOOS == "windows" {
-			newVenvCommand.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-		}
-		err = newVenvCommand.Run()
-		checkError("Failed to create new venv, see python_crash.log", err)
-
-	} else if err != nil {
-		// error checking directory, report and exit
-		checkError("Error checking new venv directory", err)
-	} else {
-		// directory already exists, skip venv creation
-		fmt.Println("New venv directory already exists, skipping venv creation")
+	pythonVersion := config.PythonVersion
+	if pythonVersion == "" {
+		pythonVersion = "3.11"
 	}
 
-	//Get the python exe from the new venv
+	freshVenv := false
+	_, err = os.Stat(config.VenvFolder)
+	if os.IsNotExist(err) {
+		freshVenv = true
+		fmt.Println("Creating venv with uv (python " + pythonVersion + ")...")
+		err = runUV(f, "venv", config.VenvFolder, "--python", pythonVersion)
+		checkError("Failed to create venv with uv, see python_crash.log", err)
+	} else if err != nil {
+		checkError("Error checking venv directory", err)
+	} else {
+		fmt.Println("Venv directory already exists, skipping venv creation")
+	}
+
 	err = filepath.Walk(config.VenvFolder, findPython)
 	checkError("Error walking the path", err)
+
+	// Show a tkinter "please wait" dialog on first setup while installing base requirements
+	var waitDialog *exec.Cmd
+	if freshVenv {
+		absVenvPython, _ := filepath.Abs(pythonBinaryPath)
+		tkScript := `import tkinter as tk; root = tk.Tk(); root.title("Install"); root.attributes("-topmost", True); tk.Message(root, text="Installing prerequisites.\nPlease wait...", padx=20, pady=20).pack(); root.mainloop()`
+		waitDialog = exec.Command(absVenvPython, "-c", tkScript)
+		if runtime.GOOS == "windows" {
+			waitDialog.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+		}
+		_ = waitDialog.Start()
+	}
+
+	fmt.Println("Installing base requirements...")
+	baseReqArgs := []string{
+		"pip", "install", "--python", config.VenvFolder,
+		"requests", "googletrans~=4.0.0rc1", "PyQt6", "PyQt6-Qt6", "dulwich~=0.21.5",
+	}
+	err = runUV(f, baseReqArgs...)
+
+	if waitDialog != nil && waitDialog.Process != nil {
+		_ = waitDialog.Process.Kill()
+		_ = waitDialog.Wait()
+	}
+
+	checkError("Failed to install base requirements with uv, see python_crash.log", err)
 
 	absNewVenvPythonBinaryPath, err := filepath.Abs(pythonBinaryPath)
 	checkError("Cannot resolve absolute path for python binary", err)
 
-	//Get the script's location
 	pythonScript := "install.py"
 	absPythonScriptPath, err := filepath.Abs(pythonScript)
 	checkError("Cannot resolve absolute path for python script", err)
 	fmt.Println("Python Script Path: ", absPythonScriptPath)
 	fmt.Println("Venv Python Binary Path: ", absNewVenvPythonBinaryPath)
 
+	absUvPath, _ := filepath.Abs(uvPath())
+	absVenvPath, _ := filepath.Abs(config.VenvFolder)
+
 	cmd := exec.Command(absNewVenvPythonBinaryPath, absPythonScriptPath)
+	cmd.Env = append(uvEnv(), "UV_PATH="+absUvPath, "VENV_PATH="+absVenvPath)
 	cmd.Stderr = f
 
 	if runtime.GOOS == "windows" {
 		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	}
-	err = cmd.Run()
-	counter := 0
-	if err != nil {
-		exitError, ok := err.(*exec.ExitError) // type assert to *exec.ExitError
-		if ok {
-			for {
-				counter += 1
-				if exitError.ExitCode() != 99 || !ok || counter > 3 {
-					if !amAdmin() {
-						runMeElevated()
-					} else {
-						deleteVenv := false
-						for _, arg := range os.Args {
-							if arg == "-delete-venv" {
-								deleteVenv = true
-								break
-							}
-						}
-						if deleteVenv {
-							checkError("Install failed even after resetting venv. Giving up.", err)
-						} else {
-							print("Install failed even when running as admin, resetting venv...")
-							runMeElevatedWithArg("-delete-venv")
-						}
+	for counter := 0; counter <= 3; counter++ {
+		err = cmd.Run()
+		if err == nil {
+			break
+		}
+
+		exitError, ok := err.(*exec.ExitError)
+		if !ok || exitError.ExitCode() != 99 || counter >= 3 {
+			if !amAdmin() {
+				runMeElevated()
+			} else {
+				deleteVenv := false
+				for _, arg := range os.Args {
+					if arg == "-delete-venv" {
+						deleteVenv = true
+						break
 					}
-					os.Exit(1)
 				}
-				cmd = exec.Command(absNewVenvPythonBinaryPath, absPythonScriptPath)
-				if runtime.GOOS == "windows" {
-					cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+				if deleteVenv {
+					checkError("Install failed even after resetting venv. Giving up.", err)
+				} else {
+					print("Install failed even when running as admin, resetting venv...")
+					runMeElevatedWithArg("-delete-venv")
 				}
-				err = cmd.Run()
-				exitError, ok = err.(*exec.ExitError) // type assert to *exec.ExitError
 			}
-		} else {
-			checkError("install.py script error, see python_crash.log", err)
+			os.Exit(1)
+		}
+
+		// Exit code 99 means install.py wants a restart — retry
+		cmd = exec.Command(absNewVenvPythonBinaryPath, absPythonScriptPath)
+		cmd.Env = append(uvEnv(), "UV_PATH="+absUvPath, "VENV_PATH="+absVenvPath)
+		cmd.Stderr = f
+		if runtime.GOOS == "windows" {
+			cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 		}
 	}
 
@@ -266,7 +284,7 @@ func runMeElevatedWithArg(arg string) {
 	cwdPtr, _ := syscall.UTF16PtrFromString(cwd)
 	argPtr, _ := syscall.UTF16PtrFromString(args)
 
-	var showCmd int32 = 1 //SW_HIDE
+	var showCmd int32 = 1
 	err := windows.ShellExecute(0, verbPtr, exePtr, argPtr, cwdPtr, showCmd)
 	if err != nil {
 		fmt.Println(err)
