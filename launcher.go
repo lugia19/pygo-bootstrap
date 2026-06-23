@@ -9,12 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"syscall"
 	"time"
-)
-
-import (
-	"golang.org/x/sys/windows"
 )
 
 var pythonBinaryPath string
@@ -57,14 +52,19 @@ func checkError(message string, err error) {
 		print(message)
 		if !amAdmin() {
 			print("Restarting as admin...")
+			arg := ""
 			if strings.Contains(message, "venv") {
 				print("And deleting venv!")
-				runMeElevatedWithArg("-delete-venv")
+				arg = "-delete-venv"
 			} else {
 				print("Without deleting venv.")
-				runMeElevated()
 			}
-			os.Exit(0)
+			// On platforms with no UAC (macOS/Linux) attemptElevation returns
+			// false, so we fall through to logging + log.Fatal below instead of
+			// silently exiting.
+			if attemptElevation(arg) {
+				os.Exit(0)
+			}
 		}
 
 		logMsg := fmt.Sprintf("%s: %v", message, err)
@@ -102,16 +102,11 @@ func checkError(message string, err error) {
 }
 
 func uvPath() string {
-	exePath, err := os.Executable()
-	if err != nil {
-		log.Fatal("Cannot determine executable path: ", err)
-	}
-	return filepath.Join(filepath.Dir(exePath), "uv.exe")
+	return filepath.Join(resourceDir(), uvBinaryName())
 }
 
 func uvEnv() []string {
-	exePath, _ := os.Executable()
-	pythonInstallDir := filepath.Join(filepath.Dir(exePath), "python")
+	pythonInstallDir := filepath.Join(dataDir(), "python")
 	return append(os.Environ(), "UV_PYTHON_INSTALL_DIR="+pythonInstallDir)
 }
 
@@ -119,13 +114,16 @@ func runUV(f *os.File, args ...string) error {
 	cmd := exec.Command(uvPath(), args...)
 	cmd.Env = uvEnv()
 	cmd.Stderr = f
-	if runtime.GOOS == "windows" {
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	}
+	hideWindow(cmd)
 	return cmd.Run()
 }
 
 func main() {
+	// Establish the working directory before touching any relative path. On
+	// Windows this chdirs next to the exe; on macOS it creates and chdirs into
+	// ~/Library/Application Support/<AppName>/.
+	setupWorkingDir()
+
 	fmt.Println("Started!")
 
 	if _, err := os.Stat("./logs"); os.IsNotExist(err) {
@@ -146,7 +144,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	data, err := os.ReadFile("repo.json")
+	data, err := os.ReadFile(filepath.Join(resourceDir(), "repo.json"))
 	checkError("Error reading repo.json", err)
 
 	err = json.Unmarshal(data, &config)
@@ -187,9 +185,7 @@ func main() {
 		absVenvPython, _ := filepath.Abs(pythonBinaryPath)
 		tkScript := `import tkinter as tk; root = tk.Tk(); root.title("Install"); root.attributes("-topmost", True); tk.Message(root, text="Installing prerequisites.\nPlease wait...", padx=20, pady=20).pack(); root.mainloop()`
 		waitDialog = exec.Command(absVenvPython, "-c", tkScript)
-		if runtime.GOOS == "windows" {
-			waitDialog.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-		}
+		hideWindow(waitDialog)
 		_ = waitDialog.Start()
 	}
 
@@ -210,22 +206,24 @@ func main() {
 	absNewVenvPythonBinaryPath, err := filepath.Abs(pythonBinaryPath)
 	checkError("Cannot resolve absolute path for python binary", err)
 
-	pythonScript := "install.py"
-	absPythonScriptPath, err := filepath.Abs(pythonScript)
-	checkError("Cannot resolve absolute path for python script", err)
+	absPythonScriptPath := filepath.Join(resourceDir(), "install.py")
 	fmt.Println("Python Script Path: ", absPythonScriptPath)
 	fmt.Println("Venv Python Binary Path: ", absNewVenvPythonBinaryPath)
 
 	absUvPath, _ := filepath.Abs(uvPath())
 	absVenvPath, _ := filepath.Abs(config.VenvFolder)
 
-	cmd := exec.Command(absNewVenvPythonBinaryPath, absPythonScriptPath)
-	cmd.Env = append(uvEnv(), "UV_PATH="+absUvPath, "VENV_PATH="+absVenvPath)
-	cmd.Stderr = f
+	installEnv := append(uvEnv(),
+		"UV_PATH="+absUvPath,
+		"VENV_PATH="+absVenvPath,
+		"RESOURCE_DIR="+resourceDir(),
+	)
 
-	if runtime.GOOS == "windows" {
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	}
+	cmd := exec.Command(absNewVenvPythonBinaryPath, absPythonScriptPath)
+	cmd.Env = installEnv
+	cmd.Stderr = f
+	hideWindow(cmd)
+
 	for counter := 0; counter <= 3; counter++ {
 		err = cmd.Run()
 		if err == nil {
@@ -234,65 +232,47 @@ func main() {
 
 		exitError, ok := err.(*exec.ExitError)
 		if !ok || exitError.ExitCode() != 99 || counter >= 3 {
-			if !amAdmin() {
-				runMeElevated()
-			} else {
-				deleteVenv := false
-				for _, arg := range os.Args {
-					if arg == "-delete-venv" {
-						deleteVenv = true
-						break
-					}
-				}
-				if deleteVenv {
-					checkError("Install failed even after resetting venv. Giving up.", err)
-				} else {
-					print("Install failed even when running as admin, resetting venv...")
-					runMeElevatedWithArg("-delete-venv")
+			deleteVenv := false
+			for _, arg := range os.Args {
+				if arg == "-delete-venv" {
+					deleteVenv = true
+					break
 				}
 			}
+
+			if !amAdmin() {
+				// Not elevated. On Windows, relaunch elevated to retry.
+				if attemptElevation("") {
+					os.Exit(0)
+				}
+				// non-Windows (no UAC): fall through to local recovery below.
+			} else {
+				// Already privileged.
+				if deleteVenv {
+					checkError("Install failed even after resetting venv. Giving up.", err)
+				}
+				// On Windows, relaunch elevated with a fresh venv.
+				if attemptElevation("-delete-venv") {
+					os.Exit(0)
+				}
+				// non-Windows: fall through to local recovery below.
+			}
+
+			// Reached only when elevation/relaunch is unavailable (macOS/Linux):
+			// reset the venv ourselves so the next launch starts clean, then
+			// surface a logged fatal error instead of looping.
+			print("Install failed, resetting venv...")
+			_ = os.RemoveAll(config.VenvFolder)
+			checkError("Install failed and could not recover, see python_crash.log", err)
 			os.Exit(1)
 		}
 
 		// Exit code 99 means install.py wants a restart — retry
 		cmd = exec.Command(absNewVenvPythonBinaryPath, absPythonScriptPath)
-		cmd.Env = append(uvEnv(), "UV_PATH="+absUvPath, "VENV_PATH="+absVenvPath)
+		cmd.Env = installEnv
 		cmd.Stderr = f
-		if runtime.GOOS == "windows" {
-			cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-		}
+		hideWindow(cmd)
 	}
 
 	checkError("install.py script error, see python_crash.log", err)
-
-}
-
-func runMeElevated() {
-	runMeElevatedWithArg("")
-}
-
-func runMeElevatedWithArg(arg string) {
-	verb := "runas"
-	exe, _ := os.Executable()
-	cwd, _ := os.Getwd()
-	allArgs := append(os.Args[1:], arg)
-
-	args := strings.Join(allArgs, " ")
-
-	verbPtr, _ := syscall.UTF16PtrFromString(verb)
-	exePtr, _ := syscall.UTF16PtrFromString(exe)
-	cwdPtr, _ := syscall.UTF16PtrFromString(cwd)
-	argPtr, _ := syscall.UTF16PtrFromString(args)
-
-	var showCmd int32 = 1
-	err := windows.ShellExecute(0, verbPtr, exePtr, argPtr, cwdPtr, showCmd)
-	if err != nil {
-		fmt.Println(err)
-	}
-}
-
-func amAdmin() bool {
-	elevated := windows.GetCurrentProcessToken().IsElevated()
-	fmt.Printf("admin %v\n", elevated)
-	return elevated
 }

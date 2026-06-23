@@ -1,0 +1,17 @@
+# Deployer-provided config (per deployment, not part of the template)
+/repo.json
+
+# Build-tool cache + the deployer's icon (downloaded/kept by build-all.ps1)
+/resources/
+
+# Build outputs
+/builds/
+
+# IDE
+/.idea/
+
+# Compiled launcher binaries (built by build-all.ps1 or a bare `go build`)
+/*.exe
+/pygo-bootstrap
+/launcher-amd64
+/launcher-arm64

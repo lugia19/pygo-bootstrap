@@ -40,6 +40,9 @@ if os.name == 'nt':
 
 uv_path = os.environ.get("UV_PATH", "uv")
 venv_path = os.environ.get("VENV_PATH", "venv")
+# Read-only shipped inputs (repo.json, icon) live here; generated files (logs,
+# repo clone, the "installing" marker) are written to the current directory.
+resource_dir = os.environ.get("RESOURCE_DIR", ".")
 
 def uv_pip_install(*args, **kwargs):
     cmd = [uv_path, 'pip', 'install', '--python', venv_path, '--no-progress'] + list(args)
@@ -48,7 +51,7 @@ def uv_pip_install(*args, **kwargs):
     return subprocess.run(cmd, **defaults)
 
 logger.debug("All prerequisites available (installed by Go launcher).")
-repoData = json.load(open("repo.json"))
+repoData = json.load(open(os.path.join(resource_dir, "repo.json")))
 
 colors_dict = {
     "primary_color":"#1A1D22",
@@ -508,7 +511,7 @@ def check_if_latest(repo_path, remote_url) -> bool:
 app = QtWidgets.QApplication([])
 def main():
     if "icon" in repoData:
-        app.setWindowIcon(QtGui.QIcon(repoData["icon"]))
+        app.setWindowIcon(QtGui.QIcon(os.path.join(resource_dir, repoData["icon"])))
     app.setStyleSheet(get_stylesheet())
     repoURL = repoData["repo_url"]
     repoDir = repoData["repo_dir"]
