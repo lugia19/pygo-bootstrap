@@ -49,13 +49,6 @@ CWD = data dir).
 `<AppName>` on macOS is derived from the `.app` bundle name and must match `$APP_NAME` in
 `build-all.ps1` (it's also the macOS data-dir name, so keep it stable across releases).
 
-`install_per_user: true` in `repo.json` (optional, default portable) changes the data dir:
-Windows `%LOCALAPPDATA%\Programs\<AppName>` (named by `main.appNameBuilt`, which `build-all.ps1`
-stamps in with `-ldflags`), macOS `.../<AppName>/install`. On Windows `setupWorkingDir` then
-installs the exe + `installer-resources` there (rename-aside for a running copy), adds a Start
-Menu `.lnk` and relaunches the installed copy, so `repo.json` is read *before* `setupWorkingDir`
-(from the exe-relative resource dir).
-
 ## Build / verify
 
 - Build everything: `.\build-all.ps1` (flags: `-WindowsOnly`, `-MacOnly`). First run downloads tools

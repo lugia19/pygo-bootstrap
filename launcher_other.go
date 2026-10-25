@@ -42,19 +42,13 @@ func appName() string {
 
 // dataDir is the writable working directory. A .app bundle (e.g. in
 // /Applications) is read-only, so generated files live under the user's
-// Application Support directory instead. In per-user mode (install_per_user)
-// they go one level down, in install/, leaving Application Support/<AppName>
-// to the app's own data.
+// Application Support directory instead.
 func dataDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		log.Fatal("Cannot determine home directory: ", err)
 	}
-	dir := filepath.Join(home, "Library", "Application Support", appName())
-	if config.InstallPerUser {
-		dir = filepath.Join(dir, "install")
-	}
-	return dir
+	return filepath.Join(home, "Library", "Application Support", appName())
 }
 
 func setupWorkingDir() {
