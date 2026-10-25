@@ -59,6 +59,7 @@ assembling the bundle, and ad-hoc-signing it with `rcodesign`.
 | `venv_folder` | Virtual environment folder name (default: `venv`) |
 | `python_version` | Python version uv installs (e.g. `3.11`) |
 | `icon` | Icon filename — use a cross-platform **`.png`**; the build converts it to `.ico`/`.icns` |
+| `install_per_user` | Optional, default `false` (portable). `true`: the launcher installs itself into a known per-user folder and runs from there — see [Runtime layout](#runtime-layout) |
 
 ## Runtime layout
 
@@ -79,6 +80,30 @@ folder looks like:
   installer-resources\          (repo.json, install.py, uv.exe, icon.png)
   venv\  python\  logs\  <repo>\   (created on first run)
 ```
+
+### Per-user install (`install_per_user: true`)
+
+An optional mode for apps that should live in one known place rather than wherever the download
+was unzipped:
+
+| | Data dir |
+|---|---|
+| **Windows** | `%LOCALAPPDATA%\Programs\<AppName>\` |
+| **macOS** | `~/Library/Application Support/<AppName>/install/` |
+
+On Windows, a launcher started from anywhere else (the unzipped download) copies itself and its
+`installer-resources\` into that folder, adds a Start Menu entry, starts the installed copy and
+exits; the download folder is never written to. Running a newer download installs it over the old
+one (a copy still running is renamed aside to `.old` and cleared on the next install). `<AppName>`
+is `$APP_NAME`, stamped into the exe at build time, so a renamed download installs to the same place.
+Uninstalling is deleting that folder and the Start Menu entry.
+
+On macOS the `.app` is already the install; the mode moves the launcher's files down into
+`install/`, leaving `Application Support/<AppName>/` to the app's own data.
+
+Either way, keep the app's own data (settings, documents) out of the data dir: put it in the
+user's data folder (`%APPDATA%\<AppName>`, `~/Library/Application Support/<AppName>`), so
+reinstalling or deleting the install never touches it.
 
 ## macOS distribution note
 

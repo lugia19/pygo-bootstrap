@@ -14,10 +14,17 @@ import (
 
 var pythonBinaryPath string
 
+// appNameBuilt is stamped in by build-all.ps1 (-X main.appNameBuilt=<APP_NAME>), so a renamed
+// download still installs to the same per-user folder.
+var appNameBuilt = ""
+
 type Config struct {
 	UsePythonW    bool   `json:"use_pythonw"`
 	VenvFolder    string `json:"venv_folder"`
 	PythonVersion string `json:"python_version"`
+	// InstallPerUser: the launcher installs itself into a known per-user folder and runs from
+	// there, instead of writing everything next to itself (see dataDir per platform).
+	InstallPerUser bool `json:"install_per_user"`
 }
 
 var config Config
@@ -119,14 +126,21 @@ func runUV(f *os.File, args ...string) error {
 }
 
 func main() {
-	// Establish the working directory before touching any relative path. On
-	// Windows this chdirs next to the exe; on macOS it creates and chdirs into
-	// ~/Library/Application Support/<AppName>/.
+	// repo.json first: it says where the working directory is. resourceDir is
+	// absolute (beside the exe / in the bundle), so no working directory is needed yet.
+	data, err := os.ReadFile(filepath.Join(resourceDir(), "repo.json"))
+	checkError("Error reading repo.json", err)
+
+	err = json.Unmarshal(data, &config)
+	checkError("Error parsing repo.json", err)
+
+	// Establish the working directory before touching any relative path (dataDir:
+	// next to the exe, or the per-user install, which may install and relaunch).
 	setupWorkingDir()
 
 	fmt.Println("Started!")
 
-	if _, err := os.Stat("./logs"); os.IsNotExist(err) {
+	if _, err = os.Stat("./logs"); os.IsNotExist(err) {
 		err = os.Mkdir("./logs", 0755)
 		if err != nil {
 			log.Fatal(err)
@@ -143,12 +157,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	data, err := os.ReadFile(filepath.Join(resourceDir(), "repo.json"))
-	checkError("Error reading repo.json", err)
-
-	err = json.Unmarshal(data, &config)
-	checkError("Error parsing repo.json", err)
 
 	for _, arg := range os.Args {
 		if arg == "-delete-venv" {

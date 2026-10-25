@@ -180,7 +180,7 @@ if ($buildWin) {
     $exe = Join-Path $winDir "$APP_NAME.exe"
     $env:GOOS = "windows"; $env:GOARCH = "amd64"
     Push-Location $root
-    & go build -o $exe .
+    & go build -ldflags "-X 'main.appNameBuilt=$APP_NAME'" -o $exe .  # the per-user install folder's name
     $ok = $LASTEXITCODE -eq 0
     Pop-Location
     if (-not $ok) { throw "Windows build failed" }
