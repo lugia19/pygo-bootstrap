@@ -465,22 +465,49 @@ def clone_or_pull(gitUrl, targetDirectory):
     else:
         porcelain.pull(targetDirectory, gitUrl)
 
-def run_startup(repo_dir, script):
-    if os.path.exists(os.path.join(repo_dir, script)):
-        previousDir = os.getcwd()
-        os.chdir(repo_dir)
-        try:
-            subprocess.check_output([sys.executable, script], stderr=subprocess.STDOUT, creationflags=subprocess_flags)
-        except subprocess.CalledProcessError as e:
-            os.chdir(previousDir)
+def run_startup(repo_dir, script, restart_code=None) -> bool:
+    """Run the app until it exits. True when it exited with restart_code (repo.json
+    restart_exit_code): it asks to be updated and started again."""
+    if not os.path.exists(os.path.join(repo_dir, script)):
+        return False
+    previousDir = os.getcwd()
+    os.chdir(repo_dir)
+    try:
+        subprocess.check_output([sys.executable, script], stderr=subprocess.STDOUT, creationflags=subprocess_flags)
+    except subprocess.CalledProcessError as e:
+        os.chdir(previousDir)  # the "installing" marker lives in the data dir
+        if restart_code is not None and e.returncode == restart_code:
+            return True
 
-            error_message = e.output.decode('utf-8')
-            sys.stderr.write(f"Startup script subprocess stderr:\n {error_message}\n")
-            if "ModuleNotFoundError" in error_message:
-                open("installing", "w").close()
-                raise ValueError("Missing module.")
+        error_message = e.output.decode('utf-8', errors='replace')
+        sys.stderr.write(f"Startup script subprocess stderr:\n {error_message}\n")
+        if "ModuleNotFoundError" in error_message:
+            open("installing", "w").close()
+            raise ValueError("Missing module.")
+        else:
+            raise
+    finally:
+        os.chdir(previousDir)  # also after a clean exit, so a restart resolves paths from here
+    return False
+
+
+def update_quietly(repoURL, repoDir):
+    """The restart path: the same pull and requirements as a launch, without the
+    windows (the app asked for it; nobody is watching). A failed pull or install is
+    logged and the app starts as it is; the marker makes the next launch redo it."""
+    try:
+        if not os.path.exists("installing") and check_if_latest(repoDir, repoURL):
+            return
+        open("installing", "w").close()
+        clone_or_pull(repoURL, repoDir)
+        for package in check_requirements(repoDir):
+            if package.startswith("-r"):
+                uv_pip_install('--upgrade', '-r', package[2:].strip())
             else:
-                raise
+                uv_pip_install('--upgrade', package)
+        os.remove("installing")
+    except Exception as e:  # noqa: BLE001 - an update that didn't happen beats an app that won't start
+        logger.error(f"Quiet update failed, starting the app as it is: {e}")
 
 
 def check_requirements(repo_dir):
@@ -516,6 +543,8 @@ def main():
     repoURL = repoData["repo_url"]
     repoDir = repoData["repo_dir"]
     startupScript = repoData["startup_script"]
+    # Optional: an app that exits with this code is updated and started again, quietly.
+    restartCode = repoData.get("restart_exit_code")
 
     if os.path.exists("installing") or not os.path.exists(repoDir) or not check_if_latest(repoDir, repoURL):
         open("installing", 'w').close()
@@ -541,7 +570,9 @@ def main():
             app.exec()
         os.remove("installing")
     try:
-        run_startup(repoDir, startupScript)
+        while run_startup(repoDir, startupScript, restartCode):
+            logger.info("The app asked to restart: updating and starting it again")
+            update_quietly(repoURL, repoDir)
         app.exit(0)
         sys.exit(0)
     except ValueError:

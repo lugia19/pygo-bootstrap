@@ -59,6 +59,7 @@ assembling the bundle, and ad-hoc-signing it with `rcodesign`.
 | `venv_folder` | Virtual environment folder name (default: `venv`) |
 | `python_version` | Python version uv installs (e.g. `3.11`) |
 | `icon` | Icon filename — use a cross-platform **`.png`**; the build converts it to `.ico`/`.icns` |
+| `restart_exit_code` | Optional. When the app exits with this code (e.g. `75`), it is updated (pull + requirements, quietly: no windows) and started again, so a long-running app can install its own updates. Any other non-zero exit is still a crash. |
 
 ## Runtime layout
 

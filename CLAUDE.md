@@ -63,6 +63,13 @@ CWD = data dir).
 - The macOS `.app` is **ad-hoc** signed via `rcodesign` (works from Windows; no Apple account).
   Gatekeeper still warns on first launch — users right-click → Open or `xattr -dr com.apple.quarantine`.
 
+## Self-updating apps
+
+`restart_exit_code` in `repo.json` (optional): `install.py`'s `main` loops while the app exits with that
+code, running `update_quietly` (the same pull + requirements as a launch, no Qt windows; a failure is
+logged and the app starts as it is) before starting it again. `run_startup` returns True for it and
+always restores the working directory, since the loop resolves paths from the data dir.
+
 ## Gotchas
 
 - `repo.json`'s `icon` should be a **`.png`** (Qt loads it cross-platform; the build converts it to
