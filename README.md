@@ -81,6 +81,9 @@ folder looks like:
   venv\  python\  logs\  <repo>\   (created on first run)
 ```
 
+The app's own output (stdout and stderr) goes to `logs\app.log`; past 5 MB, the next start moves it
+to `app.log.1` and begins a new one. If the app crashes, the end of that log is what gets reported.
+
 ## macOS distribution note
 
 The `.app` is **ad-hoc** signed (no Apple Developer account required), so Gatekeeper still warns on

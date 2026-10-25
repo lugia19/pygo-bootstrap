@@ -70,6 +70,11 @@ code, running `update_quietly` (the same pull + requirements as a launch, no Qt 
 logged and the app starts as it is) before starting it again. `run_startup` returns True for it and
 always restores the working directory, since the loop resolves paths from the data dir.
 
+`run_startup` streams the app's output to `logs/app.log` (rotated to `app.log.1` past 5 MB at start)
+rather than capturing it: a long-running app would otherwise hold everything it printed in memory.
+A crash reads the tail of this run's part of the log for the report and the `ModuleNotFoundError`
+check, then raises `CalledProcessError` as before.
+
 ## Gotchas
 
 - `repo.json`'s `icon` should be a **`.png`** (Qt loads it cross-platform; the build converts it to

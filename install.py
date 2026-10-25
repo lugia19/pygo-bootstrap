@@ -465,30 +465,46 @@ def clone_or_pull(gitUrl, targetDirectory):
     else:
         porcelain.pull(targetDirectory, gitUrl)
 
+APP_LOG = os.path.join("logs", "app.log")  # in the data dir
+APP_LOG_MAX = 5 * 1024 * 1024  # past this, the next start begins a new file (the old one: app.log.1)
+APP_LOG_TAIL = 64 * 1024  # how much of the end a crash report reads
+
+
 def run_startup(repo_dir, script, restart_code=None) -> bool:
     """Run the app until it exits. True when it exited with restart_code (repo.json
-    restart_exit_code): it asks to be updated and started again."""
+    restart_exit_code): it asks to be updated and started again.
+
+    The app's output goes to logs/app.log, not into memory: a long-running app would
+    otherwise hold everything it ever printed. A crash is reported from the log's tail."""
     if not os.path.exists(os.path.join(repo_dir, script)):
         return False
+    os.makedirs("logs", exist_ok=True)
+    if os.path.exists(APP_LOG) and os.path.getsize(APP_LOG) > APP_LOG_MAX:
+        os.replace(APP_LOG, APP_LOG + ".1")
+    log_path = os.path.abspath(APP_LOG)
+    start = os.path.getsize(log_path) if os.path.exists(log_path) else 0  # where this run's output begins
     previousDir = os.getcwd()
     os.chdir(repo_dir)
     try:
-        subprocess.check_output([sys.executable, script], stderr=subprocess.STDOUT, creationflags=subprocess_flags)
-    except subprocess.CalledProcessError as e:
-        os.chdir(previousDir)  # the "installing" marker lives in the data dir
-        if restart_code is not None and e.returncode == restart_code:
-            return True
-
-        error_message = e.output.decode('utf-8', errors='replace')
-        sys.stderr.write(f"Startup script subprocess stderr:\n {error_message}\n")
-        if "ModuleNotFoundError" in error_message:
-            open("installing", "w").close()
-            raise ValueError("Missing module.")
-        else:
-            raise
+        with open(log_path, "ab") as out:
+            returncode = subprocess.run([sys.executable, script], stdout=out, stderr=subprocess.STDOUT,
+                                        creationflags=subprocess_flags).returncode
     finally:
         os.chdir(previousDir)  # also after a clean exit, so a restart resolves paths from here
-    return False
+    if returncode == 0:
+        return False
+    if restart_code is not None and returncode == restart_code:
+        return True
+
+    with open(log_path, "rb") as f:
+        f.seek(max(start, os.path.getsize(log_path) - APP_LOG_TAIL))
+        output = f.read()
+    error_message = output.decode('utf-8', errors='replace')
+    sys.stderr.write(f"Startup script subprocess stderr:\n {error_message}\n")
+    if "ModuleNotFoundError" in error_message:
+        open("installing", "w").close()  # the data dir: the next launch reinstalls the requirements
+        raise ValueError("Missing module.")
+    raise subprocess.CalledProcessError(returncode, [sys.executable, script], output=output)
 
 
 def update_quietly(repoURL, repoDir):
