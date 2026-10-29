@@ -14,6 +14,12 @@ from PyQt6 import QtWidgets, QtCore, QtGui
 import dulwich
 from dulwich import porcelain, client, repo
 import requests
+import certifi
+
+# Python on Windows only trusts root certificates Windows has already fetched (Windows fetches missing ones on demand,
+# Python can't), so HTTPS to some hosts (e.g. GitHub release downloads) fails on a fresh machine. Adding certifi's
+# bundle fixes that here and in the app, which inherits the environment.
+os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 
 logsDir = "logs"
 
